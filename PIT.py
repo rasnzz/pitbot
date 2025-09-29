@@ -9,7 +9,7 @@ from telegram import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InputMediaPhoto
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -478,28 +478,12 @@ async def show_broadcast_preview(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Ошибка при создании предпросмотра.")
         return ConversationHandler.END
 
-async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена рассылки"""
-    user = update.effective_user
-    if str(user.id) != ADMIN_CHAT_ID:
-        return ConversationHandler.END
-    
-    context.user_data.clear()
-    await update.message.reply_text(
-        "❌ Рассылка отменена",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
-
-async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка callback от кнопок подтверждения"""
+async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение и запуск рассылки"""
     query = update.callback_query
     await query.answer()
     
     if query.data == "cancel_broadcast":
-        await query.edit_message_caption(
-            caption="❌ Рассылка отменена"
-        )
         # Если это было фото, редактируем caption, иначе текст
         try:
             await query.edit_message_caption(caption="❌ Рассылка отменена")
@@ -508,10 +492,10 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     # Запуск рассылки
-    await query.edit_message_caption(
-        caption="🔄 <b>Начинаем рассылку...</b>",
-        parse_mode="HTML"
-    )
+    try:
+        await query.edit_message_caption(caption="🔄 <b>Начинаем рассылку...</b>", parse_mode="HTML")
+    except:
+        await query.edit_message_text(text="🔄 <b>Начинаем рассылку...</b>", parse_mode="HTML")
     
     broadcast_type = context.user_data.get('broadcast_type', 'text')
     broadcast_text = context.user_data.get('broadcast_text', '')
@@ -816,7 +800,7 @@ def main():
     # Создаем приложение
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Обработчик рассылки - УПРОЩЕННАЯ ВЕРСИЯ
+    # Обработчик рассылки
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler('broadcast', broadcast_start)],
         states={
@@ -852,5 +836,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
