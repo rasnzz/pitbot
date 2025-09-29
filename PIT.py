@@ -48,7 +48,7 @@ class UserManager:
     def setup_database(self):
         """Создание базы данных для отслеживания пользователей"""
         try:
-            self.conn = sqlite3.connect('/root/pitbot/PIT/users.db')
+            self.conn = sqlite3.connect('/root/pitbot/users.db')
             self.cursor = self.conn.cursor()
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -474,3 +474,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
