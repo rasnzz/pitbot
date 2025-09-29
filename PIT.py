@@ -816,7 +816,7 @@ def main():
     # Создаем приложение
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Обработчик рассылки
+    # Обработчик рассылки - УПРОЩЕННАЯ ВЕРСИЯ
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler('broadcast', broadcast_start)],
         states={
@@ -824,14 +824,14 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_text)
             ],
             BROADCAST_PHOTO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_photo),
-                MessageHandler(filters.PHOTO, broadcast_photo)
+                MessageHandler(filters.TEXT | filters.PHOTO, broadcast_photo)
             ],
         },
         fallbacks=[
             CommandHandler('cancel', broadcast_cancel),
-            CallbackQueryHandler(broadcast_confirm, pattern='^(confirm_broadcast|cancel_broadcast)$')
-        ]
+            MessageHandler(filters.Regex('^❌ Отмена$'), broadcast_cancel)
+        ],
+        allow_reentry=True
     )
     
     # Обработчики
@@ -852,4 +852,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
