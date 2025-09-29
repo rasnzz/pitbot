@@ -425,7 +425,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets_status = "✅" if gsheets_manager.is_connected else "❌"
     
     await update.message.reply_text(
-        f"📊 <b>Статистика бота P.I.T Tools:</b>\n\n"
+        f"📊 <b>Статистика бота P.I.T Store:</b>\n\n"
         f"• Всего участников: <b>{total_users}</b>\n"
         f"• Google Sheets: {sheets_status}\n"
         f"• Бот запущен: ✅\n\n"
@@ -474,4 +474,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
