@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -17,20 +18,17 @@ from telegram.ext import (
 )
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Загружаем переменные окружения
 load_dotenv()
 
-# Настройки из переменных окружения
+# Настройки
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 SPREADSHEET_URL = os.getenv('SPREADSHEET_URL')
-
-# Настройки Google Sheets
-GOOGLE_SHEETS_CREDENTIALS = "credentials.json"
 
 # Пути к изображениям
 WELCOME_IMAGE = "images/welcome.jpg"
@@ -44,18 +42,34 @@ logging.basicConfig(
 
 class GoogleSheetsManager:
     def __init__(self):
+        self.client = None
+        self.sheet = None
         self.setup_gsheets()
     
     def setup_gsheets(self):
         """Настройка подключения к Google Sheets"""
         try:
+            # ПРАВИЛЬНЫЕ SCOPE
             scope = [
-                "https://spreadsheets.google.com/feeds",
-                "https://www.googleapis.com/auth/drive"
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.file"
             ]
-            creds = Credentials.from_service_account_file(GOOGLE_SHEETS_CREDENTIALS, scopes=scope)
+            
+            # Проверяем существование файла
+            if not os.path.exists('credentials.json'):
+                logging.error("❌ Файл credentials.json не найден")
+                return False
+                
+            creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
             self.client = gspread.authorize(creds)
-            self.sheet = self.client.open_by_url(SPREADSHEET_URL).sheet1
+            
+            # Проверяем переменную окружения
+            spreadsheet_url = os.getenv('SPREADSHEET_URL')
+            if not spreadsheet_url:
+                logging.error("❌ SPREADSHEET_URL не найден в .env")
+                return False
+                
+            self.sheet = self.client.open_by_url(spreadsheet_url).sheet1
             
             # Создаем заголовки если их нет
             if not self.sheet.get_all_records():
@@ -63,11 +77,18 @@ class GoogleSheetsManager:
                 self.sheet.append_row(headers)
                 
             logging.info("✅ Google Sheets подключен успешно")
+            return True
+            
         except Exception as e:
             logging.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+            return False
     
     def add_lead(self, data):
         """Добавление лида в таблицу"""
+        if not self.sheet:
+            logging.error("❌ Google Sheets не инициализирован")
+            return False
+            
         try:
             row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -130,8 +151,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     caption = (
-        "🛠️ Добро пожаловать в <b>P.I.T Store Оренбургls</b>!\n\n"
-        "🎁 <b>Получите чет на халяву!</b>\n\n"
+        "🛠️ Добро пожаловать в <b>P.I.T Tools</b>!\n\n"
+        "🎁 <b>Получите специальный купон на скидку 15%!</b>\n\n"
         "Для участия в акции необходимо:\n"
         "1️⃣ Подписаться на наш канал\n"
         "2️⃣ Поделиться номером телефона\n\n"
@@ -213,7 +234,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сообщение с купоном
         caption = (
             "🎉 <b>Благодарим за участие!</b>\n\n"
-            f"🏷️ <b>Ваш купон на чет:</b> <code>{coupon_code}</code>\n\n"
+            f"🏷️ <b>Ваш купон на скидку:</b> <code>{coupon_code}</code>\n\n"
             "🎁 <b>Что вы получаете:</b>\n"
             "• Скидку 15% на любой инструмент\n"
             "• Подарочный набор расходных материалов\n"
@@ -265,9 +286,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Основная функция запуска бота"""
-    # Создаем папку для изображений если ее нет
-    os.makedirs("images", exist_ok=True)
-    
     # Проверяем обязательные переменные
     required_vars = ['BOT_TOKEN', 'CHANNEL_USERNAME', 'ADMIN_CHAT_ID', 'SPREADSHEET_URL']
     for var in required_vars:
