@@ -355,6 +355,7 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора типа рассылки"""
     choice = update.message.text
+    logging.info(f"Выбран тип рассылки: {choice}")
     
     if choice == "❌ Отмена":
         await update.message.reply_text(
@@ -364,27 +365,27 @@ async def broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     elif choice == "📢 Текстовая рассылка":
+        context.user_data['broadcast_type'] = 'text'
         await update.message.reply_text(
             "✍️ <b>Текстовая рассылка</b>\n\n"
             "Введите текст для рассылки:",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="HTML"
         )
-        context.user_data['broadcast_type'] = 'text'
         return BROADCAST_PHOTO
     
     elif choice == "🖼️ Рассылка с фото":
+        context.user_data['broadcast_type'] = 'photo'
         await update.message.reply_text(
             "🖼️ <b>Рассылка с фото</b>\n\n"
             "Отправьте фото для рассылки:",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="HTML"
         )
-        context.user_data['broadcast_type'] = 'photo'
         return BROADCAST_PHOTO
     
     else:
-        await update.message.reply_text("❌ Неверный выбор")
+        await update.message.reply_text("❌ Неверный выбор. Пожалуйста, используйте кнопки.")
         return BROADCAST_TEXT
 
 async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,63 +395,104 @@ async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     broadcast_type = context.user_data.get('broadcast_type', 'text')
+    logging.info(f"Обработка рассылки типа: {broadcast_type}")
     
     try:
+        # Если это фото и мы ожидаем фото
         if broadcast_type == 'photo' and update.message.photo:
             # Сохраняем фото
             photo_file = await update.message.photo[-1].get_file()
             context.user_data['broadcast_photo'] = photo_file.file_id
+            context.user_data['photo_received'] = True
             
             await update.message.reply_text(
                 "✅ Фото получено! Теперь введите текст для рассылки:"
             )
             return BROADCAST_PHOTO
         
+        # Если это текст (для фоторассылки после получения фото ИЛИ для текстовой рассылки)
         elif update.message.text:
-            # Сохраняем текст
-            context.user_data['broadcast_text'] = update.message.text
+            # Если для фоторассылки уже получили фото
+            if broadcast_type == 'photo' and context.user_data.get('photo_received'):
+                context.user_data['broadcast_text'] = update.message.text
+                return await show_broadcast_preview(update, context)
             
-            # Подтверждение рассылки
-            user_count = len(user_manager.get_all_users())
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Начать рассылку", callback_data="confirm_broadcast")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")]
-            ])
+            # Если для текстовой рассылки
+            elif broadcast_type == 'text':
+                context.user_data['broadcast_text'] = update.message.text
+                return await show_broadcast_preview(update, context)
             
-            preview_text = (
-                f"📢 <b>Предпросмотр рассылки</b>\n\n"
-                f"Текст: {update.message.text}\n"
-                f"Тип: {'Фото + текст' if broadcast_type == 'photo' else 'Только текст'}\n"
-                f"Получателей: {user_count}\n\n"
-                f"<i>Подтвердите начало рассылки:</i>"
-            )
-            
-            if broadcast_type == 'photo' and 'broadcast_photo' in context.user_data:
-                await update.message.reply_photo(
-                    photo=context.user_data['broadcast_photo'],
-                    caption=preview_text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
             else:
                 await update.message.reply_text(
-                    preview_text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
+                    "❌ Сначала отправьте фото для рассылки."
                 )
-            
-            return ConversationHandler.END
+                return BROADCAST_PHOTO
     
     except Exception as e:
         logging.error(f"❌ Ошибка в процессе рассылки: {e}")
-        await update.message.reply_text("❌ Произошла ошибка")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте снова.")
         return ConversationHandler.END
     
-    await update.message.reply_text("❌ Пожалуйста, отправьте текст")
+    await update.message.reply_text("❌ Пожалуйста, отправьте текст или фото в зависимости от выбранного типа рассылки.")
     return BROADCAST_PHOTO
 
-async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Подтверждение и запуск рассылки"""
+async def show_broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать предпросмотр рассылки"""
+    broadcast_type = context.user_data.get('broadcast_type', 'text')
+    broadcast_text = context.user_data.get('broadcast_text', '')
+    broadcast_photo = context.user_data.get('broadcast_photo', None)
+    
+    user_count = len(user_manager.get_all_users())
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Начать рассылку", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")]
+    ])
+    
+    preview_text = (
+        f"📢 <b>Предпросмотр рассылки</b>\n\n"
+        f"Текст: {broadcast_text}\n"
+        f"Тип: {'Фото + текст' if broadcast_type == 'photo' else 'Только текст'}\n"
+        f"Получателей: {user_count}\n\n"
+        f"<i>Подтвердите начало рассылки:</i>"
+    )
+    
+    try:
+        if broadcast_type == 'photo' and broadcast_photo:
+            await update.message.reply_photo(
+                photo=broadcast_photo,
+                caption=preview_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                preview_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка показа предпросмотра: {e}")
+        await update.message.reply_text("❌ Ошибка при создании предпросмотра.")
+        return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена рассылки"""
+    user = update.effective_user
+    if str(user.id) != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+    
+    context.user_data.clear()
+    await update.message.reply_text(
+        "❌ Рассылка отменена",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка callback от кнопок подтверждения"""
     query = update.callback_query
     await query.answer()
     
@@ -458,7 +500,12 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(
             caption="❌ Рассылка отменена"
         )
-        return ConversationHandler.END
+        # Если это было фото, редактируем caption, иначе текст
+        try:
+            await query.edit_message_caption(caption="❌ Рассылка отменена")
+        except:
+            await query.edit_message_text(text="❌ Рассылка отменена")
+        return
     
     # Запуск рассылки
     await query.edit_message_caption(
@@ -805,3 +852,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
