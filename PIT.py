@@ -49,7 +49,7 @@ logging.basicConfig(
 
 class UserManager:
     def __init__(self):
-        self.db_path = '/root/pitbot/PIT/users.db'
+        self.db_path = '/root/pitbot/users.db'
         self.setup_database()
     
     def get_connection(self):
@@ -836,3 +836,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
