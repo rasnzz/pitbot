@@ -2,12 +2,14 @@ import logging
 import os
 import sys
 import sqlite3
+import asyncio
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    InputMediaPhoto
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -15,7 +17,8 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     filters,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    ConversationHandler
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -35,6 +38,9 @@ SPREADSHEET_URL = os.getenv('SPREADSHEET_URL')
 WELCOME_IMAGE = "images/welcome.jpg"
 COUPON_IMAGE = "images/coupon.jpg"
 
+# Состояния для рассылки
+BROADCAST_TEXT, BROADCAST_PHOTO = range(2)
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -43,14 +49,28 @@ logging.basicConfig(
 
 class UserManager:
     def __init__(self):
+        self.db_path = '/root/pitbot/PIT/users.db'
         self.setup_database()
+    
+    def get_connection(self):
+        """Создание соединения с базой данных"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA foreign_keys = ON")
+            return conn
+        except Exception as e:
+            logging.error(f"❌ Ошибка подключения к БД: {e}")
+            return None
     
     def setup_database(self):
         """Создание базы данных для отслеживания пользователей"""
         try:
-            self.conn = sqlite3.connect('/root/pitbot/users.db')
-            self.cursor = self.conn.cursor()
-            self.cursor.execute('''
+            conn = self.get_connection()
+            if conn is None:
+                return
+            
+            cursor = conn.cursor()
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     phone TEXT UNIQUE,
@@ -60,7 +80,8 @@ class UserManager:
                     coupon_code TEXT
                 )
             ''')
-            self.conn.commit()
+            conn.commit()
+            conn.close()
             logging.info("✅ База данных пользователей инициализирована")
         except Exception as e:
             logging.error(f"❌ Ошибка инициализации базы данных: {e}")
@@ -68,17 +89,30 @@ class UserManager:
     def is_user_registered(self, user_id):
         """Проверка, регистрировался ли пользователь ранее"""
         try:
-            self.cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
-            return self.cursor.fetchone() is not None
+            conn = self.get_connection()
+            if conn is None:
+                return False
+                
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone() is not None
+            conn.close()
+            return result
         except Exception as e:
-            logging.error(f"❌ Ошибка проверки пользователя: {e}")
+            logging.error(f"❌ Ошибка проверки пользователя {user_id}: {e}")
             return False
     
     def register_user(self, user_data):
         """Регистрация нового пользователя"""
+        conn = None
         try:
-            self.cursor.execute('''
-                INSERT INTO users (user_id, phone, username, first_name, registered_at, coupon_code)
+            conn = self.get_connection()
+            if conn is None:
+                return False
+                
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO users (user_id, phone, username, first_name, registered_at, coupon_code)
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (
                 user_data['user_id'],
@@ -88,35 +122,88 @@ class UserManager:
                 datetime.now(),
                 user_data.get('coupon', '')
             ))
-            self.conn.commit()
+            conn.commit()
+            conn.close()
             logging.info(f"✅ Пользователь {user_data['user_id']} зарегистрирован в локальной БД")
             return True
-        except sqlite3.IntegrityError:
-            logging.warning(f"⚠️ Пользователь {user_data['user_id']} уже зарегистрирован")
-            return False
+        except sqlite3.IntegrityError as e:
+            logging.warning(f"⚠️ Ошибка целостности данных для пользователя {user_data['user_id']}: {e}")
+            # Пробуем обновить существующую запись
+            try:
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE users SET 
+                        phone = ?, username = ?, first_name = ?, registered_at = ?, coupon_code = ?
+                        WHERE user_id = ?
+                    ''', (
+                        user_data['phone'],
+                        user_data.get('username', ''),
+                        user_data.get('first_name', ''),
+                        datetime.now(),
+                        user_data.get('coupon', ''),
+                        user_data['user_id']
+                    ))
+                    conn.commit()
+                    conn.close()
+                    logging.info(f"✅ Данные пользователя {user_data['user_id']} обновлены")
+                    return True
+            except Exception as update_error:
+                logging.error(f"❌ Ошибка обновления пользователя {user_data['user_id']}: {update_error}")
+                return False
         except Exception as e:
-            logging.error(f"❌ Ошибка регистрации пользователя: {e}")
+            logging.error(f"❌ Ошибка регистрации пользователя {user_data['user_id']}: {e}")
+            if conn:
+                conn.close()
             return False
     
     def get_user_coupon(self, user_id):
         """Получение купона пользователя"""
         try:
-            self.cursor.execute('SELECT coupon_code FROM users WHERE user_id = ?', (user_id,))
-            result = self.cursor.fetchone()
+            conn = self.get_connection()
+            if conn is None:
+                return None
+                
+            cursor = conn.cursor()
+            cursor.execute('SELECT coupon_code FROM users WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone()
+            conn.close()
             return result[0] if result else None
         except Exception as e:
-            logging.error(f"❌ Ошибка получения купона: {e}")
+            logging.error(f"❌ Ошибка получения купона для {user_id}: {e}")
             return None
     
     def get_stats(self):
         """Получение статистики"""
         try:
-            self.cursor.execute('SELECT COUNT(*) FROM users')
-            total_users = self.cursor.fetchone()[0]
+            conn = self.get_connection()
+            if conn is None:
+                return 0
+                
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM users')
+            total_users = cursor.fetchone()[0]
+            conn.close()
             return total_users
         except Exception as e:
             logging.error(f"❌ Ошибка получения статистики: {e}")
             return 0
+    
+    def get_all_users(self):
+        """Получение списка всех пользователей"""
+        try:
+            conn = self.get_connection()
+            if conn is None:
+                return []
+                
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id FROM users')
+            users = cursor.fetchall()
+            conn.close()
+            return [user[0] for user in users]
+        except Exception as e:
+            logging.error(f"❌ Ошибка получения списка пользователей: {e}")
+            return []
 
 class GoogleSheetsManager:
     def __init__(self):
@@ -242,6 +329,230 @@ async def send_photo_with_caption(chat_id, context, image_path, caption, reply_m
         )
         return False
 
+# ========== РАССЫЛКА СООБЩЕНИЙ ==========
+
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса рассылки"""
+    user = update.effective_user
+    if str(user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Эта команда только для администратора")
+        return ConversationHandler.END
+
+    keyboard = ReplyKeyboardMarkup([
+        ["📢 Текстовая рассылка"],
+        ["🖼️ Рассылка с фото"],
+        ["❌ Отмена"]
+    ], resize_keyboard=True, one_time_keyboard=True)
+
+    await update.message.reply_text(
+        "📢 <b>Панель рассылки</b>\n\n"
+        "Выберите тип рассылки:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    return BROADCAST_TEXT
+
+async def broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора типа рассылки"""
+    choice = update.message.text
+    
+    if choice == "❌ Отмена":
+        await update.message.reply_text(
+            "❌ Рассылка отменена",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
+    elif choice == "📢 Текстовая рассылка":
+        await update.message.reply_text(
+            "✍️ <b>Текстовая рассылка</b>\n\n"
+            "Введите текст для рассылки:",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="HTML"
+        )
+        context.user_data['broadcast_type'] = 'text'
+        return BROADCAST_PHOTO
+    
+    elif choice == "🖼️ Рассылка с фото":
+        await update.message.reply_text(
+            "🖼️ <b>Рассылка с фото</b>\n\n"
+            "Отправьте фото для рассылки:",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="HTML"
+        )
+        context.user_data['broadcast_type'] = 'photo'
+        return BROADCAST_PHOTO
+    
+    else:
+        await update.message.reply_text("❌ Неверный выбор")
+        return BROADCAST_TEXT
+
+async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка фото и текста для рассылки"""
+    user = update.effective_user
+    if str(user.id) != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+
+    broadcast_type = context.user_data.get('broadcast_type', 'text')
+    
+    try:
+        if broadcast_type == 'photo' and update.message.photo:
+            # Сохраняем фото
+            photo_file = await update.message.photo[-1].get_file()
+            context.user_data['broadcast_photo'] = photo_file.file_id
+            
+            await update.message.reply_text(
+                "✅ Фото получено! Теперь введите текст для рассылки:"
+            )
+            return BROADCAST_PHOTO
+        
+        elif update.message.text:
+            # Сохраняем текст
+            context.user_data['broadcast_text'] = update.message.text
+            
+            # Подтверждение рассылки
+            user_count = len(user_manager.get_all_users())
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Начать рассылку", callback_data="confirm_broadcast")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")]
+            ])
+            
+            preview_text = (
+                f"📢 <b>Предпросмотр рассылки</b>\n\n"
+                f"Текст: {update.message.text}\n"
+                f"Тип: {'Фото + текст' if broadcast_type == 'photo' else 'Только текст'}\n"
+                f"Получателей: {user_count}\n\n"
+                f"<i>Подтвердите начало рассылки:</i>"
+            )
+            
+            if broadcast_type == 'photo' and 'broadcast_photo' in context.user_data:
+                await update.message.reply_photo(
+                    photo=context.user_data['broadcast_photo'],
+                    caption=preview_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                await update.message.reply_text(
+                    preview_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            
+            return ConversationHandler.END
+    
+    except Exception as e:
+        logging.error(f"❌ Ошибка в процессе рассылки: {e}")
+        await update.message.reply_text("❌ Произошла ошибка")
+        return ConversationHandler.END
+    
+    await update.message.reply_text("❌ Пожалуйста, отправьте текст")
+    return BROADCAST_PHOTO
+
+async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение и запуск рассылки"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel_broadcast":
+        await query.edit_message_caption(
+            caption="❌ Рассылка отменена"
+        )
+        return ConversationHandler.END
+    
+    # Запуск рассылки
+    await query.edit_message_caption(
+        caption="🔄 <b>Начинаем рассылку...</b>",
+        parse_mode="HTML"
+    )
+    
+    broadcast_type = context.user_data.get('broadcast_type', 'text')
+    broadcast_text = context.user_data.get('broadcast_text', '')
+    broadcast_photo = context.user_data.get('broadcast_photo', None)
+    
+    users = user_manager.get_all_users()
+    total_users = len(users)
+    success_count = 0
+    fail_count = 0
+    
+    # Статистика для админа
+    progress_message = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"📊 <b>Статистика рассылки</b>\n\n"
+             f"▪️ Отправлено: 0/{total_users}\n"
+             f"▪️ Успешно: 0\n"
+             f"▪️ Ошибок: 0",
+        parse_mode="HTML"
+    )
+    
+    for i, user_id in enumerate(users, 1):
+        try:
+            if broadcast_type == 'photo' and broadcast_photo:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=broadcast_photo,
+                    caption=broadcast_text,
+                    parse_mode="HTML"
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=broadcast_text,
+                    parse_mode="HTML"
+                )
+            success_count += 1
+            
+            # Обновляем статистику каждые 10 сообщений
+            if i % 10 == 0 or i == total_users:
+                await context.bot.edit_message_text(
+                    chat_id=ADMIN_CHAT_ID,
+                    message_id=progress_message.message_id,
+                    text=f"📊 <b>Статистика рассылки</b>\n\n"
+                         f"▪️ Отправлено: {i}/{total_users}\n"
+                         f"▪️ Успешно: {success_count}\n"
+                         f"▪️ Ошибок: {fail_count}",
+                    parse_mode="HTML"
+                )
+            
+            # Задержка чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            fail_count += 1
+            logging.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+    
+    # Финальная статистика
+    await context.bot.edit_message_text(
+        chat_id=ADMIN_CHAT_ID,
+        message_id=progress_message.message_id,
+        text=f"✅ <b>Рассылка завершена!</b>\n\n"
+             f"▪️ Всего получателей: {total_users}\n"
+             f"▪️ Успешно: {success_count}\n"
+             f"▪️ Ошибок: {fail_count}\n"
+             f"▪️ Процент доставки: {round(success_count/total_users*100, 1) if total_users > 0 else 0}%",
+        parse_mode="HTML"
+    )
+    
+    # Очищаем данные рассылки
+    context.user_data.clear()
+    
+    return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена рассылки"""
+    user = update.effective_user
+    if str(user.id) != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+    
+    context.user_data.clear()
+    await update.message.reply_text(
+        "❌ Рассылка отменена",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+# ========== ОСНОВНЫЕ ФУНКЦИИ БОТА ==========
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
@@ -264,8 +575,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     caption = (
-        "🛠️ Добро пожаловать в <b>P.I.T Store Оренбург</b>!\n\n"
-        "🎁 <b>Получите специальный купон на что то</b>\n\n"
+        "🛠️ Добро пожаловать в <b>P.I.T Tools</b>!\n\n"
+        "🎁 <b>Получите специальный купон на скидку 15%!</b>\n\n"
         "Для участия в акции необходимо:\n"
         "1️⃣ Подписаться на наш канал\n"
         "2️⃣ Поделиться номером телефона\n\n"
@@ -310,7 +621,7 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             
             await query.edit_message_caption(
-                caption="✅ <b>Отлично! Вы подписаны на канал!</b>\nТеперь поделитесь своим номером телефона с помощью кнопки ниже 👇"
+                caption="✅ <b>Отлично! Вы подписаны на канал!</b>\n\nТеперь поделитесь своим номером телефона с помощью кнопки ниже 👇"
             )
             
             await context.bot.send_message(
@@ -373,15 +684,15 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Сообщение с купоном
             caption = (
                 "🎉 <b>Благодарим за участие!</b>\n\n"
-                f"🏷️ <b>Ваш купон на чет:</b> <code>{coupon_code}</code>\n\n"
+                f"🏷️ <b>Ваш купон на скидку:</b> <code>{coupon_code}</code>\n\n"
                 "🎁 <b>Что вы получаете:</b>\n"
-                "• чет тут будет\n"
-                "• и тут может\n"
+                "• Скидку 15% на любой инструмент\n"
+                "• Подарочный набор расходных материалов\n"
                 "• Бесплатную консультацию специалиста\n\n"
                 "🏪 <b>Адрес магазина:</b>\n"
-                "г. Оренбург, ул. Монтажников 37/3\n\n"
+                "г. Москва, ул. Инструментальная, д. 15\n\n"
                 "📞 <b>Телефон для связи:</b> +7 (495) 123-45-67\n\n"
-                "<i>Купон действует в течение 15 дней</i>"
+                "<i>Купон действует в течение 30 дней</i>"
             )
             
             await send_photo_with_caption(
@@ -425,7 +736,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets_status = "✅" if gsheets_manager.is_connected else "❌"
     
     await update.message.reply_text(
-        f"📊 <b>Статистика бота P.I.T Store:</b>\n\n"
+        f"📊 <b>Статистика бота P.I.T Tools:</b>\n\n"
         f"• Всего участников: <b>{total_users}</b>\n"
         f"• Google Sheets: {sheets_status}\n"
         f"• Бот запущен: ✅\n\n"
@@ -458,10 +769,30 @@ def main():
     # Создаем приложение
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
+    # Обработчик рассылки
+    broadcast_conv = ConversationHandler(
+        entry_points=[CommandHandler('broadcast', broadcast_start)],
+        states={
+            BROADCAST_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_text)
+            ],
+            BROADCAST_PHOTO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_photo),
+                MessageHandler(filters.PHOTO, broadcast_photo)
+            ],
+        },
+        fallbacks=[
+            CommandHandler('cancel', broadcast_cancel),
+            CallbackQueryHandler(broadcast_confirm, pattern='^(confirm_broadcast|cancel_broadcast)$')
+        ]
+    )
+    
     # Обработчики
+    application.add_handler(broadcast_conv)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CallbackQueryHandler(check_subscription, pattern="check_subscription"))
+    application.add_handler(CallbackQueryHandler(broadcast_confirm, pattern="^(confirm_broadcast|cancel_broadcast)$"))
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
@@ -474,6 +805,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
